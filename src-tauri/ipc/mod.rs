@@ -163,4 +163,200 @@ fn remove_clip(
 pub fn init() {
     // This function is called from main.rs to register commands
     // In Tauri v2, we use the #[command] attribute directly
+}use ffmpeg_next::{format::context::Input, media::Type};
+
+/// Media metadata extracted from a file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MediaMetadata {
+    /// Duration in seconds.
+    pub duration: f64,
+    /// Width in pixels (for video).
+    pub width: Option<u32>,
+    /// Height in pixels (for video).
+    pub height: Option<u32>,
+    /// Frame rate (as a fraction, e.g., 24/1).
+    pub frame_rate_num: u32,
+    pub frame_rate_den: u32,
+    /// Whether the media has video.
+    pub has_video: bool,
+    /// Whether the media has audio.
+    pub has_audio: bool,
+}
+
+/// Probe a media file to get its metadata.
+#[command]
+fn probe_media(path: String) -> Result<MediaMetadata, String> {
+    let input = Input::open(&path)
+        .map_err(|e| format!("Failed to open media file: {}", e))?;
+    
+    let mut duration = 0.0;
+    let mut width = None;
+    let mut height = None;
+    let mut frame_rate_num = 0;
+    let mut frame_rate_den = 1;
+    let mut has_video = false;
+    let mut has_audio = false;
+
+    for stream in input.streams() {
+        match stream.codec().parameters().media_type() {
+            Type::Video => {
+                has_video = true;
+                if let Some(codecpar) = stream.codec_parameters() {
+                    width = Some(codecpar.width());
+                    height = Some(codecpar.height());
+                    // Try to get frame rate
+                    if let Ok(avg_frame_rate) = stream.avg_frame_rate() {
+                        frame_rate_num = avg_frame_rate.numer();
+                        frame_rate_den = avg_frame_rate.denom();
+                    }
+                }
+            }
+            Type::Audio => {
+                has_audio = true;
+            }
+            _ => {}
+        }
+    }
+
+    // Get duration from the format context
+    if let Ok(fmt_ctx) = input.format() {
+        duration = fmt_ctx.duration() as f64 / AV_TIME_BASE as f64;
+    }
+
+    Ok(MediaMetadata {
+        duration,
+        width,
+        height,
+        frame_rate_num,
+        frame_rate_den,
+        has_video,
+        has_audio,
+    })
+}
+
+
+use std::fs;
+use std::path::PathBuf;
+
+/// Directory entry information.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DirectoryEntry {
+    /// File name.
+    pub name: String,
+    /// Full path.
+    pub path: String,
+    /// Whether this entry is a directory.
+    pub is_dir: bool,
+    /// File size in bytes (if file).
+    pub size: Option<u64>,
+    /// Media duration in seconds (if media file).
+    pub duration: Option<f64>,
+}
+
+/// Read the contents of a directory.
+#[command]
+fn read_directory(path: String) -> Result<Vec<DirectoryEntry>, String> {
+    let path = PathBuf::from(path);
+    if !path.exists() {
+        return Err(format!("Path does not exist: {}", path.display()));
+    }
+    if !path.is_dir() {
+        return Err(format!("Path is not a directory: {}", path.display()));
+    }
+
+    let mut entries = Vec::new();
+    for entry in fs::read_dir(path).map_err(|e| format!("Failed to read directory: {}", e))? {
+        let entry = entry.map_err(|e| format!("Failed to read directory entry: {}", e))?;
+        let metadata = entry.metadata().map_err(|e| format!("Failed to get metadata: {}", e))?;
+        let is_dir = metadata.is_dir();
+        let len = metadata.len();
+        let mut duration = None;
+
+        // If it's a file and looks like a media file, probe for duration
+        if !is_dir {
+            let ext = entry.path()
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_lowercase();
+            if matches!(ext.as_str(), "mp4" | "mov" | "mkv" | "avi" | "mxf" | "webm" | "mp3" | "wav" | "flac" | "aac") {
+                // Probe for duration (we'll reuse the probe_media command logic, but for simplicity we'll do a quick probe here)
+                // In a real implementation, we might want to cache this or use a background thread.
+                if let Ok(metadata) = probe_media_internal(&entry.path()) {
+                    duration = Some(metadata.duration);
+                }
+            }
+        }
+
+        entries.push(DirectoryEntry {
+            name: entry.file_name().to_string_lossy().into_owned(),
+            path: entry.path().to_string_lossy().into_owned(),
+            is_dir,
+            size: if !is_dir { Some(len) } else { None },
+            duration,
+        });
+    }
+
+    // Sort: directories first, then files, both alphabetically
+    entries.sort_by(|a, b| {
+        if a.is_dir && !b.is_dir {
+            std::cmp::Ordering::Less
+        } else if !a.is_dir && b.is_dir {
+            std::cmp::Ordering::Greater
+        } else {
+            a.name.cmp(&b.name)
+        }
+    });
+
+    Ok(entries)
+}
+
+/// Internal function to probe media duration (similar to the public command but takes a PathBuf).
+fn probe_media_internal(path: &PathBuf) -> Result<MediaMetadata, String> {
+    let input = Input::open(path)
+        .map_err(|e| format!("Failed to open media file: {}", e))?;
+    
+    let mut duration = 0.0;
+    let mut width = None;
+    let mut height = None;
+    let mut frame_rate_num = 0;
+    let mut frame_rate_den = 1;
+    let mut has_video = false;
+    let mut has_audio = false;
+
+    for stream in input.streams() {
+        match stream.codec().parameters().media_type() {
+            Type::Video => {
+                has_video = true;
+                if let Some(codecpar) = stream.codec_parameters() {
+                    width = Some(codecpar.width());
+                    height = Some(codecpar.height());
+                    // Try to get frame rate
+                    if let Ok(avg_frame_rate) = stream.avg_frame_rate() {
+                        frame_rate_num = avg_frame_rate.numer();
+                        frame_rate_den = avg_frame_rate.denom();
+                    }
+                }
+            }
+            Type::Audio => {
+                has_audio = true;
+            }
+            _ => {}
+        }
+    }
+
+    // Get duration from the format context
+    if let Ok(fmt_ctx) = input.format() {
+        duration = fmt_ctx.duration() as f64 / AV_TIME_BASE as f64;
+    }
+
+    Ok(MediaMetadata {
+        duration,
+        width,
+        height,
+        frame_rate_num,
+        frame_rate_den,
+        has_video,
+        has_audio,
+    })
 }

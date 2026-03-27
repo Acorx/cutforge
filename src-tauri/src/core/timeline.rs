@@ -1,9 +1,11 @@
 use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use uuid::Uuid;
 
 /// Represents a single media clip on the timeline.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+use crate::Color;
 pub struct Clip {
     /// Unique identifier for the clip.
     pub id: Uuid,
@@ -279,5 +281,221 @@ impl PlaybackState {
             // Clamp to timeline duration (if we had access to it here)
             // For now, we just let it go beyond; the frontend can handle clamping.
         }
+    }
+}
+
+impl Track {
+    /// Enable or disable the track.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+
+    /// Mute or unmute the track.
+    pub fn set_mute(&mut self, mute: bool) {
+        self.mute = mute;
+    }
+
+    /// Solo or unsolo the track.
+    pub fn set_solo(&mut self, solo: bool) {
+        self.solo = solo;
+    }
+}
+
+impl Clip {
+    /// Enable or disable the clip.
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+    }
+}
+
+impl Timeline {
+    /// Set mute state of a track.
+    pub fn set_track_mute(&mut self, track_id: &Uuid, mute: bool) -> bool {
+        if let Some(track) = self.get_track_mut(track_id) {
+            track.set_mute(mute);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Set solo state of a track.
+    pub fn set_track_solo(&mut self, track_id: &Uuid, solo: bool) -> bool {
+        if let Some(track) = self.get_track_mut(track_id) {
+            track.set_solo(solo);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Set enabled state of a track.
+    pub fn set_track_enabled(&mut self, track_id: &Uuid, enabled: bool) -> bool {
+        if let Some(track) = self.get_track_mut(track_id) {
+            track.set_enabled(enabled);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Set enabled state of a clip on a track.
+    pub fn set_clip_enabled(&mut self, track_id: &Uuid, clip_id: &Uuid, enabled: bool) -> bool {
+        if let Some(track) = self.get_track_mut(track_id) {
+            if let Some(clip) = track.clips.iter_mut().find(|c| c.id == *clip_id) {
+                clip.set_enabled(enabled);
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        }
+    }
+
+    /// Remove a track by ID.
+    pub fn remove_track(&mut self, track_id: &Uuid) -> bool {
+        let len_before = self.tracks.len();
+        self.tracks.retain(|t| t.id != *track_id);
+        self.tracks.len() < len_before
+    }
+}
+
+use serde::{Deserialize, Serialize};
+use std::fmt;
+
+/// RGBA color as a 32-bit integer (0xAARRGGBB).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Color(pub u32);
+
+impl Color {
+    /// Create a color from RGBA components (each 0-255).
+    pub const fn from_rgba(r: u8, g: u8, b: u8, a: u8) -> Self {
+        Self(((a as u32) << 24) | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32))
+    }
+
+    /// Create a color from RGB components (alpha = 255).
+    pub const fn from_rgb(r: u8, g: u8, b: u8) -> Self {
+        Self::from_rgba(r, g, b, 255)
+    }
+}
+
+impl Default for Color {
+    fn default() -> Self {
+        // Default to a medium blue-gray
+        Color::from_rgb(100, 100, 150)
+    }
+}
+
+impl fmt::Display for Color {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let a = ((self.0 >> 24) & 0xFF) as u8;
+        let r = ((self.0 >> 16) & 0xFF) as u8;
+        let g = ((self.0 >> 8) & 0xFF) as u8;
+        let b = (self.0 & 0xFF) as u8;
+        write!(f, "#{:02X}{:02X}{:02X}{:02X}", a, r, g, b)
+    }
+}
+
+impl Track {
+    /// Set the color of the track (for UI display).
+    pub fn set_color(&mut self, color: Color) {
+        self.color = color;
+    }
+}
+
+impl Clip {
+    /// Set a custom name for the clip (defaults to filename if not set).
+    pub fn set_name(&mut self, name: Option<String>) {
+        self.custom_name = name;
+    }
+
+    /// Get the display name: custom name if set, otherwise filename from source_path.
+    pub fn get_display_name(&self) -> String {
+        if let Some(ref name) = self.custom_name {
+            return name.clone();
+        }
+        // Extract filename from source_path
+        std::path::Path::new(&self.source_path)
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string()
+    }
+}
+
+impl Timeline {
+    /// Split a clip on a track at a given timeline time.
+    /// Returns the IDs of the two resulting clips (left, right) if successful.
+    /// The original clip is replaced by the left part, and a new clip is inserted for the right part.
+    /// The split time must be within the clip's timeline range (strictly between start and end).
+    pub fn split_clip(
+        &mut self,
+        track_id: &Uuid,
+        clip_id: &Uuid,
+        split_time: f64,
+    ) -> Result<(Uuid, Uuid), String> {
+        let track = self
+            .get_track_mut(track_id)
+            .ok_or_else(|| format!("Track {} not found", track_id))?;
+
+        let clip_index = track
+            .clips
+            .iter()
+            .position(|c| c.id == *clip_id)
+            .ok_or_else(|| format!("Clip {} not found on track {}", clip_id, track_id))?;
+
+        let clip = &track.clips[clip_index];
+        if split_time <= clip.timeline_start || split_time >= clip.timeline_end {
+            return Err(format!(
+                "Split time {} is not within clip range [{}, {}]",
+                split_time, clip.timeline_start, clip.timeline_end
+            ));
+        }
+
+        // Calculate how much of the source media is in the left part.
+        let source_duration = clip.source_end - clip.source_start;
+        let timeline_duration = clip.timeline_end - clip.timeline_start;
+        if timeline_duration <= 0.0 {
+            return Err("Clip has zero or negative timeline duration".to_string());
+        }
+        let source_offset = ((split_time - clip.timeline_start) / timeline_duration) * source_duration;
+        let left_source_end = clip.source_start + source_offset;
+        let right_source_start = clip.source_start + source_offset;
+
+        // Left clip: same source start, new end, same timeline start, new end = split_time
+        let left_clip = Clip {
+            id: clip.id, // keep same ID for left part
+            source_path: clip.source_path.clone(),
+            source_start: clip.source_start,
+            source_end: left_source_end,
+            timeline_start: clip.timeline_start,
+            timeline_end: split_time,
+            enabled: clip.enabled,
+            volume: clip.volume,
+            opacity: clip.opacity,
+        };
+
+        // Right clip: new ID, source start = offset, same source end, timeline start = split_time, same timeline end
+        let right_clip = Clip {
+            id: Uuid::new_v4(),
+            source_path: clip.source_path.clone(),
+            source_start: right_source_start,
+            source_end: clip.source_end,
+            timeline_start: split_time,
+            timeline_end: clip.timeline_end,
+            enabled: clip.enabled,
+            volume: clip.volume,
+            opacity: clip.opacity,
+        };
+
+        // Replace the original clip with the left clip, and insert the right clip after it.
+        track.clips[clip_index] = left_clip;
+        track.clips.insert(clip_index + 1, right_clip);
+
+        // Recalculate duration (might have changed if the clip was at the end)
+        self.recalculate_duration();
+
+        Ok((left_clip.id, right_clip.id))
     }
 }

@@ -18,6 +18,13 @@ fn main() {
             crate::ipc::update_clip_volume,
             crate::ipc::update_clip_opacity,
             crate::ipc::remove_clip,
+            crate::ipc::play_timeline,
+            crate::ipc::pause_timeline,
+            crate::ipc::set_playback_rate,
+            crate::ipc::seek_to_time,
+            crate::ipc::get_playback_state,
+            crate::ipc::probe_media,
+            crate::ipc::read_directory,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
