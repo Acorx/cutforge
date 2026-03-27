@@ -249,3 +249,35 @@ mod tests {
         assert_eq!(track.clips[2].source_path, "a.mp4");
     }
 }
+/// Playback state of the timeline.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaybackState {
+    /// Whether the timeline is currently playing.
+    pub is_playing: bool,
+    /// Current playback position in seconds.
+    pub current_time: f64,
+    /// Playback rate (1.0 = normal speed).
+    pub playback_rate: f64,
+}
+
+impl Default for PlaybackState {
+    fn default() -> Self {
+        Self {
+            is_playing: false,
+            current_time: 0.0,
+            playback_rate: 1.0,
+        }
+    }
+}
+
+impl PlaybackState {
+    /// Update current time based on elapsed time and playback rate.
+    /// This would typically be called by a timer tick.
+    pub fn update(&mut self, delta_seconds: f64) {
+        if self.is_playing {
+            self.current_time += delta_seconds * self.playback_rate;
+            // Clamp to timeline duration (if we had access to it here)
+            // For now, we just let it go beyond; the frontend can handle clamping.
+        }
+    }
+}
