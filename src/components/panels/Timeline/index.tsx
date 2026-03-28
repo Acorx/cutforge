@@ -12,12 +12,13 @@ interface TimelineProps {
 }
 
 export const Timeline: React.FC<TimelineProps> = () => {
-  const { tracks, isPlaying, currentTime, playbackRate, fetchTimeline, play, pause, setPlaybackRate, seek, addTrack, addClip } = useTimelineStore();
+  const { tracks, isPlaying, currentTime, playbackRate, fetchTimeline, play, pause, setPlaybackRate, seek, addTrack, addClip, setTracks, setIsPlaying, setCurrentTime, setDuration } = useTimelineStore();
   const timelineRef = useRef<HTMLDivElement>(null);
   const [zoomLevel, setZoomLevel] = useState(100); // pixels per second
   const [scrollPosition, setScrollPosition] = useState(0); // seconds
-  const [duration, setDuration] = useState(0);
+  const [duration, setDurationLocal] = useState(0);
   const [isUpdatingTime, setIsUpdatingTime] = useState(false);
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
 
   // Fetch timeline on mount and periodically if playing
   useEffect(() => {
@@ -25,7 +26,7 @@ export const Timeline: React.FC<TimelineProps> = () => {
       try {
         const timeline = await invoke('get_timeline');
         set({ tracks: timeline.tracks || [] });
-        setDuration(timeline.duration || 0);
+        setDurationLocal(timeline.duration || 0);
       } catch (error) {
         console.error('Failed to fetch timeline:', error);
       }
@@ -81,34 +82,85 @@ export const Timeline: React.FC<TimelineProps> = () => {
     seek(secondsFromStart);
   };
 
-  // Handle drop from media browser
+  // Handle drop from media browser or file system
   const handleDrop = async (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
-    const data = e.dataTransfer.getData('text/plain');
+    setIsDraggingOver(false);
     try {
-      const fileInfo = JSON.parse(data);
-      // Find first video track
-      const videoTrack = tracks.find(t => t.track_type === 'Video');
+      const data = e.dataTransfer.getData('text/plain');
+      if (!data) return;
+      
+      const droppedData = JSON.parse(data);
+      const { path, is_dir, duration: fileDuration } = droppedData;
+      
+      if (is_dir || !path) return;
+      
+      // Find first video track, or create one if none exists
+      let videoTrack = tracks.find(t => t.track_type === 'Video');
+      let trackId: string;
+      
       if (videoTrack) {
-        await addClip(
-          videoTrack.id,
-          fileInfo.path,
-          0, // sourceStart - we'd get this from probing or assume 0 for now
-          fileInfo.duration || 10, // sourceEnd - assume 10 seconds if not known
-          currentTime // timelineStart
-        );
-        // Refetch timeline to get updated clips
+        trackId = videoTrack.id;
+      } else {
+        // Create a new video track
+        const newTrackId = await invoke('add_track', { 
+          name: 'Video 1', 
+          track_type: 'Video' 
+        });
+        // Refetch to get the updated tracks
         await fetchTimeline();
+        // Get the newly created track
+        const updatedTimeline = await invoke('get_timeline');
+        videoTrack = updatedTimeline.tracks.find(t => t.track_type === 'Video');
+        trackId = videoTrack ? videoTrack.id : newTrackId;
       }
+      
+      // Calculate timeline position based on drop location
+      if (!timelineRef.current) return;
+      const rect = timelineRef.current.getBoundingClientRect();
+      const clickX = e.clientX - rect.left;
+      const secondsFromStart = scrollPosition + (clickX / zoomLevel);
+      
+      // Use actual file duration if available, otherwise try to probe
+      let sourceEnd = fileDuration || 10; // fallback to 10 seconds
+      let sourceStart = 0;
+      
+      // Try to get actual duration from file (in case the dropped data didn't have it)
+      if (!fileDuration || fileDuration === 0) {
+        try {
+          const metadata = await invoke('probe_media', { path });
+          sourceEnd = metadata.duration;
+        } catch (probeError) {
+          console.warn('Failed to probe media duration, using fallback:', probeError);
+          // Keep fallback duration
+        }
+      }
+      
+      // Add the clip
+      await addClip(
+        trackId,
+        path,
+        sourceStart,
+        sourceEnd,
+        secondsFromStart
+      );
+      
+      // Refetch timeline to get updated clips
+      await fetchTimeline();
     } catch (error) {
       console.error('Error processing drop:', error);
     }
   };
 
-  // Handle dragover to allow drop
+  // Handle dragover to allow drop and show visual feedback
   const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     e.dataTransfer.dropEffect = 'copy';
+    setIsDraggingOver(true);
+  };
+
+  const handleDragLeave = () => {
+    setIsDraggingOver(false);
   };
 
   // Handle keyboard shortcuts
@@ -177,7 +229,18 @@ export const Timeline: React.FC<TimelineProps> = () => {
   }, [handleKeyDown, pause, play, seek, setZoomLevel, zoomLevel, duration]);
 
   return (
-    <div className="timeline-panel" onDrop={handleDrop} onDragOver={handleDragOver} tabIndex="-1" onFocus={() => {}}>
+    <div 
+      className="timeline-panel" 
+      onDrop={handleDrop} 
+      onDragOver={handleDragOver} 
+      onDragLeave={handleDragLeave}
+      tabIndex="-1"
+      onFocus={() => {}} // Ensure it can receive focus for keyboard events
+      style={{ 
+        opacity: isDraggingOver ? 0.8 : 1,
+        border: isDraggingOver ? '2px dashed #0078ff' : 'none'
+      }}
+    >
       <div className="timeline-header">
         <TimeRuler zoomLevel={zoomLevel} duration={duration} scrollPosition={scrollPosition} />
         <ZoomControls zoomLevel={zoomLevel} onZoomChange={setZoomLevel} />
@@ -189,6 +252,7 @@ export const Timeline: React.FC<TimelineProps> = () => {
         onClick={handleTimelineClick}
         onDrop={handleDrop}
         onDragOver={handleDragOver}
+        onDragLeave={handleDragLeave}
         onFocus={() => {}} // Ensure it can receive focus for keyboard events
       >
         <div className="timeline-content">
